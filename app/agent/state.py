@@ -1,6 +1,7 @@
-from typing import Any
+from operator import add
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 
 class AgentState(BaseModel):
@@ -14,9 +15,10 @@ class AgentState(BaseModel):
 
     status: str = "received"
 
-    evidence: list[dict[str, Any]] = Field(
-        default_factory=list
-    )
+    evidence: Annotated[
+        list[dict[str, Any]],
+        add
+    ] = []
 
     hypothesis: str | None = None
 

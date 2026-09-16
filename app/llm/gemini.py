@@ -137,10 +137,6 @@ def investigate_incident(prompt: str) -> str:
             )
 
             # Send the tool result back to Gemini.
-            #
-            # For the Gemini endpoint/model currently
-            # being used by Aegis, function responses
-            # are returned under the "user" role.
             contents.append(
                 types.Content(
                     role="user",
@@ -154,3 +150,68 @@ def investigate_incident(prompt: str) -> str:
         "Investigation stopped after reaching "
         "the maximum number of tool iterations."
     )
+
+
+def analyze_evidence(
+    incident_title: str,
+    incident_description: str,
+    service: str,
+    evidence: list
+) -> str:
+    """
+    Analyze collected operational evidence and produce
+    a grounded incident hypothesis.
+    """
+
+    prompt = f"""
+You are investigating a software operations incident.
+
+Incident title:
+{incident_title}
+
+Incident description:
+{incident_description}
+
+Affected service:
+{service}
+
+Collected operational evidence:
+{evidence}
+
+Analyze only the evidence provided above.
+
+Produce a concise hypothesis explaining the most likely
+cause or contributing factor of the incident.
+
+Follow these rules carefully:
+
+1. Separate direct observations from hypotheses.
+
+2. Treat log messages as evidence of observed system behavior,
+   but do not automatically treat them as proof of the ultimate
+   root cause.
+
+3. Temporal proximity between a deployment and an incident
+   indicates correlation, not causation.
+
+4. Do not claim that a deployment caused the incident unless
+   the supplied evidence directly establishes that relationship.
+
+5. Explicitly mention important uncertainties or alternative
+   explanations.
+
+6. Do not invent facts that are not present in the evidence.
+
+Structure your response as:
+
+Primary hypothesis:
+Supporting evidence:
+Uncertainties:
+"""
+
+    response = client.models.generate_content(
+        model="gemini-3.6-flash",
+        contents=prompt
+    )
+
+    return response.text
