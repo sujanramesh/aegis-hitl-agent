@@ -5,6 +5,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from app.agent.state import AgentState
 from app.agent.risk import assess_action_risk
 
+from app.tools.action_executor import execute_action
 from app.tools.service_health import get_service_health
 from app.tools.deployments import get_recent_deployments
 from app.tools.log_search import search_logs
@@ -14,6 +15,10 @@ from app.llm.gemini import (
     propose_remediation,
 )
 
+
+# =========================================================
+# Incident investigation nodes
+# =========================================================
 
 def initialize_incident(state: AgentState) -> dict:
     """
@@ -83,6 +88,10 @@ def collect_logs(state: AgentState) -> dict:
     }
 
 
+# =========================================================
+# Reasoning nodes
+# =========================================================
+
 def analyze_incident(state: AgentState) -> dict:
     """
     Analyze accumulated evidence and generate
@@ -104,7 +113,7 @@ def analyze_incident(state: AgentState) -> dict:
 
 def propose_action(state: AgentState) -> dict:
     """
-    Generate a proposed remediation action from the
+    Generate a structured remediation action from the
     current incident hypothesis and evidence.
     """
 
@@ -120,6 +129,10 @@ def propose_action(state: AgentState) -> dict:
         "status": "action_proposed"
     }
 
+
+# =========================================================
+# Risk and human approval nodes
+# =========================================================
 
 def assess_risk(state: AgentState) -> dict:
     """
@@ -148,7 +161,7 @@ def await_approval(state: AgentState) -> dict:
         {
             "message": "Human approval required",
             "service": state.service,
-            "proposed_action": state.proposed_action,
+            "proposed_action": state.proposed_action.model_dump(),
             "risk_level": state.risk_level,
         }
     )
@@ -157,19 +170,6 @@ def await_approval(state: AgentState) -> dict:
         "approval_decision": decision.get("decision"),
         "approval_reason": decision.get("reason"),
         "status": "approval_received"
-    }
-
-
-def ready_for_execution(state: AgentState) -> dict:
-    """
-    Mark an authorized action as eligible for
-    controlled execution.
-
-    No operational action is executed by this node.
-    """
-
-    return {
-        "status": "ready_for_execution"
     }
 
 
@@ -183,6 +183,70 @@ def action_cancelled(state: AgentState) -> dict:
         "status": "action_cancelled"
     }
 
+
+# =========================================================
+# Execution and verification nodes
+# =========================================================
+
+def execute_authorized_action(state: AgentState) -> dict:
+    """
+    Execute an action only after it has passed the
+    application's authorization path.
+    """
+
+    if state.proposed_action is None:
+        return {
+            "execution_result": {
+                "success": False,
+                "message": "No proposed action available."
+            },
+            "status": "execution_failed"
+        }
+
+    result = execute_action(
+        state.proposed_action
+    )
+
+    return {
+        "execution_result": result,
+        "status": (
+            "executed"
+            if result["success"]
+            else "execution_failed"
+        )
+    }
+
+
+def verify_recovery(state: AgentState) -> dict:
+    """
+    Verify the operational health of the service
+    after an authorized action has executed successfully.
+    """
+
+    health = get_service_health(
+        state.service
+    )
+
+    recovered = (
+        health["status"] == "healthy"
+    )
+
+    return {
+        "verification_result": {
+            "recovered": recovered,
+            "health": health
+        },
+        "status": (
+            "resolved"
+            if recovered
+            else "verification_failed"
+        )
+    }
+
+
+# =========================================================
+# Routing functions
+# =========================================================
 
 def route_after_risk_assessment(state: AgentState) -> str:
     """
@@ -207,16 +271,31 @@ def route_after_approval(state: AgentState) -> str:
     return "cancelled"
 
 
-# ---------------------------------------------------------
+def route_after_execution(state: AgentState) -> str:
+    """
+    Route according to whether the authorized
+    operational action executed successfully.
+    """
+
+    if (
+        state.execution_result
+        and state.execution_result.get("success")
+    ):
+        return "verify"
+
+    return "failed"
+
+
+# =========================================================
 # Build workflow graph
-# ---------------------------------------------------------
+# =========================================================
 
 workflow_builder = StateGraph(AgentState)
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Register nodes
-# ---------------------------------------------------------
+# =========================================================
 
 workflow_builder.add_node(
     "initialize_incident",
@@ -259,8 +338,13 @@ workflow_builder.add_node(
 )
 
 workflow_builder.add_node(
-    "ready_for_execution",
-    ready_for_execution
+    "execute_authorized_action",
+    execute_authorized_action
+)
+
+workflow_builder.add_node(
+    "verify_recovery",
+    verify_recovery
 )
 
 workflow_builder.add_node(
@@ -269,9 +353,9 @@ workflow_builder.add_node(
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Investigation flow
-# ---------------------------------------------------------
+# =========================================================
 
 workflow_builder.add_edge(
     START,
@@ -309,40 +393,54 @@ workflow_builder.add_edge(
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Risk-based routing
-# ---------------------------------------------------------
+# =========================================================
 
 workflow_builder.add_conditional_edges(
     "assess_risk",
     route_after_risk_assessment,
     {
         "approval": "await_approval",
-        "execution": "ready_for_execution"
+        "execution": "execute_authorized_action"
     }
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Human approval routing
-# ---------------------------------------------------------
+# =========================================================
 
 workflow_builder.add_conditional_edges(
     "await_approval",
     route_after_approval,
     {
-        "execution": "ready_for_execution",
+        "execution": "execute_authorized_action",
         "cancelled": "action_cancelled"
     }
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
+# Execution-result routing
+# =========================================================
+
+workflow_builder.add_conditional_edges(
+    "execute_authorized_action",
+    route_after_execution,
+    {
+        "verify": "verify_recovery",
+        "failed": END
+    }
+)
+
+
+# =========================================================
 # Terminal paths
-# ---------------------------------------------------------
+# =========================================================
 
 workflow_builder.add_edge(
-    "ready_for_execution",
+    "verify_recovery",
     END
 )
 
@@ -352,9 +450,9 @@ workflow_builder.add_edge(
 )
 
 
-# ---------------------------------------------------------
+# =========================================================
 # Checkpointing
-# ---------------------------------------------------------
+# =========================================================
 
 checkpointer = InMemorySaver()
 

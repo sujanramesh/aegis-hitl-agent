@@ -1,44 +1,40 @@
-def assess_action_risk(action: str) -> dict:
+from app.agent.actions import ProposedAction
+
+
+def assess_action_risk(
+    action: ProposedAction
+) -> dict:
     """
-    Assess the operational risk of a proposed action.
+    Assess the operational risk of a structured action.
 
-    The risk decision is owned by the application,
-    not by the LLM.
+    Risk policy is deterministic and application-owned.
+    The LLM does not decide whether its proposed action
+    is safe or whether human approval is required.
     """
 
-    action_lower = action.lower()
+    high_risk_actions = {
+        "rollback_deployment",
+        "restart_service",
+        "rotate_credential",
+        "revoke_credential",
+        "deploy_service",
+        "disable_service",
+        "delete_resource",
+    }
 
-    high_risk_keywords = [
-        "rollback",
-        "roll back",
-        "restart",
-        "delete",
-        "disable",
-        "deploy",
-        "rotate",
-        "revoke",
-    ]
+    medium_risk_actions = {
+        "update_configuration",
+        "modify_configuration",
+        "refresh_configuration",
+    }
 
-    medium_risk_keywords = [
-        "update",
-        "modify",
-        "change",
-        "refresh",
-    ]
-
-    if any(
-        keyword in action_lower
-        for keyword in high_risk_keywords
-    ):
+    if action.action_type in high_risk_actions:
         return {
             "risk_level": "high",
             "requires_approval": True
         }
 
-    if any(
-        keyword in action_lower
-        for keyword in medium_risk_keywords
-    ):
+    if action.action_type in medium_risk_actions:
         return {
             "risk_level": "medium",
             "requires_approval": True

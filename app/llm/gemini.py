@@ -7,6 +7,7 @@ from google.genai import types
 from app.tools.service_health import get_service_health
 from app.tools.deployments import get_recent_deployments
 from app.tools.log_search import search_logs
+from app.agent.actions import ProposedAction
 
 
 # Load environment variables from .env
@@ -221,10 +222,10 @@ def propose_remediation(
     service: str,
     hypothesis: str,
     evidence: list
-) -> str:
+) -> ProposedAction:
     """
-    Propose a remediation action based on the current
-    incident hypothesis and supporting evidence.
+    Propose a structured remediation action based on the
+    current incident hypothesis and supporting evidence.
     """
 
     prompt = f"""
@@ -242,30 +243,41 @@ def propose_remediation(
     Supporting operational evidence:
     {evidence}
 
-    Propose one concrete remediation action that could help
-    resolve or further diagnose this incident.
+    Propose exactly one concrete remediation action.
 
     Follow these rules:
 
     1. Base the action only on the supplied hypothesis
        and evidence.
 
-    2. Propose exactly one action.
+    2. Do not execute the action.
 
-    3. Do not execute the action.
+    3. Do not decide whether the action is safe.
 
-    4. Do not decide whether the action is safe.
+    4. Do not decide whether human approval is required.
 
-    5. Do not decide whether human approval is required.
+    5. Use a concise machine-readable action type.
 
-    6. Keep the action concise and operationally specific.
+    Examples of action types:
+    - rollback_deployment
+    - inspect_configuration
+    - restart_service
+    - rotate_credential
 
-    Return only the proposed action.
+    6. Put action-specific values inside parameters.
+
+    7. Provide a concise rationale grounded in the evidence.
     """
 
     response = client.models.generate_content(
         model="gemini-3.6-flash",
-        contents=prompt
+        contents=prompt,
+        config={
+            "response_mime_type": "application/json",
+            "response_schema": ProposedAction,
+        }
     )
 
-    return response.text.strip()
+    return ProposedAction.model_validate_json(
+        response.text
+    )

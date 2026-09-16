@@ -2,6 +2,7 @@ from operator import add
 from typing import Annotated, Any
 
 from pydantic import BaseModel, Field
+from app.agent.actions import ProposedAction
 
 
 class AgentState(BaseModel):
@@ -22,7 +23,7 @@ class AgentState(BaseModel):
 
     hypothesis: str | None = None
 
-    proposed_action: str | None = None
+    proposed_action: ProposedAction | None = None
 
     risk_level: str | None = None
 
@@ -30,3 +31,8 @@ class AgentState(BaseModel):
 
     approval_decision: str | None = None
     approval_reason: str | None = None
+
+    execution_result: dict[str, Any] | None = None
+    verification_result: dict[str, Any] | None = None
+
+    

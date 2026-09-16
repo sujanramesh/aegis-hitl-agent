@@ -1,28 +1,23 @@
+from app.infrastructure.mock_environment import MOCK_SERVICES
+
+
 def get_service_health(service_name: str) -> dict:
+    """
+    Get the current operational health of a service
+    from the shared Aegis mock environment.
+    """
 
-    mock_services = {
-        "payment-service": {
-            "status": "degraded",
-            "error_rate": 17.3,
-            "latency_ms": 840
-        },
-        "auth-service": {
-            "status": "healthy",
-            "error_rate": 0.4,
-            "latency_ms": 120
-        },
-        "order-service": {
-            "status": "healthy",
-            "error_rate": 0.8,
-            "latency_ms": 180
-        }
-    }
+    service = MOCK_SERVICES.get(service_name)
 
-    return mock_services.get(
-        service_name,
-        {
+    if service is None:
+        return {
             "status": "unknown",
             "error_rate": None,
             "latency_ms": None
         }
-    )
+
+    return {
+        "status": service["status"],
+        "error_rate": service["error_rate"],
+        "latency_ms": service["latency_ms"]
+    }
