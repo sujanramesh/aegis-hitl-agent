@@ -27,3 +27,6 @@ class AgentState(BaseModel):
     risk_level: str | None = None
 
     requires_approval: bool = False
+
+    approval_decision: str | None = None
+    approval_reason: str | None = None

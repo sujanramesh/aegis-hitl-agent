@@ -1,4 +1,6 @@
 from langgraph.graph import StateGraph, START, END
+from langgraph.types import interrupt
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.agent.state import AgentState
 from app.agent.risk import assess_action_risk
@@ -138,21 +140,30 @@ def assess_risk(state: AgentState) -> dict:
 
 def await_approval(state: AgentState) -> dict:
     """
-    Route a consequential action toward human approval.
-
-    This currently represents an approval state only.
-    A real workflow interrupt and resume mechanism
-    will be added later.
+    Pause the workflow and request a human decision
+    for a consequential operational action.
     """
 
+    decision = interrupt(
+        {
+            "message": "Human approval required",
+            "service": state.service,
+            "proposed_action": state.proposed_action,
+            "risk_level": state.risk_level,
+        }
+    )
+
     return {
-        "status": "awaiting_approval"
+        "approval_decision": decision.get("decision"),
+        "approval_reason": decision.get("reason"),
+        "status": "approval_received"
     }
 
 
 def ready_for_execution(state: AgentState) -> dict:
     """
-    Mark a low-risk action as eligible for controlled execution.
+    Mark an authorized action as eligible for
+    controlled execution.
 
     No operational action is executed by this node.
     """
@@ -162,10 +173,21 @@ def ready_for_execution(state: AgentState) -> dict:
     }
 
 
+def action_cancelled(state: AgentState) -> dict:
+    """
+    Mark a proposed action as cancelled after
+    human rejection.
+    """
+
+    return {
+        "status": "action_cancelled"
+    }
+
+
 def route_after_risk_assessment(state: AgentState) -> str:
     """
-    Select the next workflow path using the
-    application-owned approval decision.
+    Route according to the application-owned
+    risk and approval policy.
     """
 
     if state.requires_approval:
@@ -174,11 +196,28 @@ def route_after_risk_assessment(state: AgentState) -> str:
     return "execution"
 
 
-# Create the graph using Aegis's state schema.
+def route_after_approval(state: AgentState) -> str:
+    """
+    Route according to the human approval decision.
+    """
+
+    if state.approval_decision == "approved":
+        return "execution"
+
+    return "cancelled"
+
+
+# ---------------------------------------------------------
+# Build workflow graph
+# ---------------------------------------------------------
+
 workflow_builder = StateGraph(AgentState)
 
 
-# Register workflow nodes.
+# ---------------------------------------------------------
+# Register nodes
+# ---------------------------------------------------------
+
 workflow_builder.add_node(
     "initialize_incident",
     initialize_incident
@@ -224,8 +263,16 @@ workflow_builder.add_node(
     ready_for_execution
 )
 
+workflow_builder.add_node(
+    "action_cancelled",
+    action_cancelled
+)
 
-# Define workflow transitions.
+
+# ---------------------------------------------------------
+# Investigation flow
+# ---------------------------------------------------------
+
 workflow_builder.add_edge(
     START,
     "initialize_incident"
@@ -262,7 +309,10 @@ workflow_builder.add_edge(
 )
 
 
-# Route the workflow according to the risk-policy decision.
+# ---------------------------------------------------------
+# Risk-based routing
+# ---------------------------------------------------------
+
 workflow_builder.add_conditional_edges(
     "assess_risk",
     route_after_risk_assessment,
@@ -273,19 +323,41 @@ workflow_builder.add_conditional_edges(
 )
 
 
-# Both paths currently stop here.
-# Actual approval/resume and execution will be added later.
-workflow_builder.add_edge(
+# ---------------------------------------------------------
+# Human approval routing
+# ---------------------------------------------------------
+
+workflow_builder.add_conditional_edges(
     "await_approval",
-    END
+    route_after_approval,
+    {
+        "execution": "ready_for_execution",
+        "cancelled": "action_cancelled"
+    }
 )
+
+
+# ---------------------------------------------------------
+# Terminal paths
+# ---------------------------------------------------------
 
 workflow_builder.add_edge(
     "ready_for_execution",
     END
 )
 
+workflow_builder.add_edge(
+    "action_cancelled",
+    END
+)
 
-# Compile only after all nodes and edges
-# have been registered.
-workflow = workflow_builder.compile()
+
+# ---------------------------------------------------------
+# Checkpointing
+# ---------------------------------------------------------
+
+checkpointer = InMemorySaver()
+
+workflow = workflow_builder.compile(
+    checkpointer=checkpointer
+)
