@@ -1,8 +1,9 @@
 import os
+import time
 
 from dotenv import load_dotenv
 from google import genai
-from google.genai import types
+from google.genai import types, errors
 
 from app.tools.service_health import get_service_health
 from app.tools.deployments import get_recent_deployments
@@ -10,7 +11,10 @@ from app.tools.log_search import search_logs
 from app.agent.actions import ProposedAction
 
 
-# Load environment variables from .env
+# =========================================================
+# Configuration
+# =========================================================
+
 load_dotenv()
 
 api_key = os.getenv("GEMINI_API_KEY")
@@ -19,11 +23,128 @@ if not api_key:
     raise ValueError("GEMINI_API_KEY is not configured")
 
 
-# Create Gemini client
-client = genai.Client(api_key=api_key)
+MODEL_NAME = "gemini-3.6-flash"
+
+MAX_LLM_ATTEMPTS = 3
+INITIAL_RETRY_DELAY_SECONDS = 1
 
 
-# Tools Gemini is allowed to request
+# =========================================================
+# Gemini client
+# =========================================================
+
+client = genai.Client(
+    api_key=api_key
+)
+
+
+# =========================================================
+# Application-level LLM exceptions
+# =========================================================
+
+class LLMUnavailableError(Exception):
+    """
+    Raised when the configured LLM provider remains
+    unavailable after controlled retry attempts.
+
+    This prevents provider failures from leaking directly
+    into the Aegis workflow.
+    """
+
+    pass
+
+
+# =========================================================
+# LLM resilience layer
+# =========================================================
+
+def _is_retryable_error(error: Exception) -> bool:
+    """
+    Determine whether an LLM provider error is transient
+    and therefore safe to retry.
+
+    Aegis currently retries:
+    - HTTP 429: rate limit / quota pressure
+    - HTTP 500: internal server error
+    - HTTP 502: bad gateway
+    - HTTP 503: service unavailable
+    - HTTP 504: gateway timeout
+
+    Permanent client errors such as invalid authentication
+    or malformed requests should fail immediately.
+    """
+
+    status_code = getattr(error, "status_code", None)
+
+    # Some versions of the SDK expose the HTTP status as
+    # `code` rather than `status_code`.
+    if status_code is None:
+        status_code = getattr(error, "code", None)
+
+    return status_code in {
+        429,
+        500,
+        502,
+        503,
+        504,
+    }
+
+
+def _generate_content_with_retry(**kwargs):
+    """
+    Execute a Gemini generate_content request with
+    controlled retry and exponential backoff.
+
+    The SDK may already perform some internal retries.
+    This wrapper represents Aegis's application-level
+    reliability boundary.
+
+    If Gemini remains unavailable, the provider-specific
+    exception is converted into LLMUnavailableError.
+    """
+
+    delay = INITIAL_RETRY_DELAY_SECONDS
+
+    for attempt in range(1, MAX_LLM_ATTEMPTS + 1):
+
+        try:
+            return client.models.generate_content(
+                **kwargs
+            )
+
+        except (
+            errors.ClientError,
+            errors.ServerError,
+        ) as error:
+
+            if not _is_retryable_error(error):
+                raise
+
+            if attempt == MAX_LLM_ATTEMPTS:
+                raise LLMUnavailableError(
+                    "Gemini remained unavailable after "
+                    f"{MAX_LLM_ATTEMPTS} attempts. "
+                    f"Last provider error: {error}"
+                ) from error
+
+            print(
+                f"[Aegis LLM] Attempt {attempt} failed "
+                f"with a transient provider error. "
+                f"Retrying in {delay} second(s)..."
+            )
+
+            time.sleep(delay)
+
+            # Exponential backoff:
+            # 1 second -> 2 seconds -> 4 seconds ...
+            delay *= 2
+
+
+# =========================================================
+# Operational tools
+# =========================================================
+
+# Tools Gemini is allowed to request.
 AVAILABLE_TOOLS = [
     get_service_health,
     get_recent_deployments,
@@ -31,7 +152,7 @@ AVAILABLE_TOOLS = [
 ]
 
 
-# Actual Python functions Aegis is allowed to execute
+# Actual Python functions Aegis is allowed to execute.
 TOOL_REGISTRY = {
     "get_service_health": get_service_health,
     "get_recent_deployments": get_recent_deployments,
@@ -39,18 +160,27 @@ TOOL_REGISTRY = {
 }
 
 
+# =========================================================
+# Standard generation
+# =========================================================
+
 def generate_response(prompt: str) -> str:
     """
-    Generate a standard LLM response without operational tools.
+    Generate a standard LLM response without
+    operational tools.
     """
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
+    response = _generate_content_with_retry(
+        model=MODEL_NAME,
         contents=prompt
     )
 
     return response.text
 
+
+# =========================================================
+# Tool-using investigation agent
+# =========================================================
 
 def investigate_incident(prompt: str) -> str:
     """
@@ -62,26 +192,30 @@ def investigate_incident(prompt: str) -> str:
 
     config = types.GenerateContentConfig(
         tools=AVAILABLE_TOOLS,
-        automatic_function_calling=types.AutomaticFunctionCallingConfig(
-            disable=True
+        automatic_function_calling=(
+            types.AutomaticFunctionCallingConfig(
+                disable=True
+            )
         )
     )
 
-    # Initial conversation containing the incident
+    # Initial conversation containing the incident.
     contents = [
         types.Content(
             role="user",
             parts=[
-                types.Part.from_text(text=prompt)
+                types.Part.from_text(
+                    text=prompt
+                )
             ]
         )
     ]
 
-    # Maximum of 5 reasoning/tool iterations
+    # Maximum of 5 reasoning/tool iterations.
     for _ in range(5):
 
-        response = client.models.generate_content(
-            model="gemini-3.6-flash",
+        response = _generate_content_with_retry(
+            model=MODEL_NAME,
             contents=contents,
             config=config
         )
@@ -153,6 +287,10 @@ def investigate_incident(prompt: str) -> str:
     )
 
 
+# =========================================================
+# Evidence analysis
+# =========================================================
+
 def analyze_evidence(
     incident_title: str,
     incident_description: str,
@@ -210,12 +348,17 @@ Supporting evidence:
 Uncertainties:
 """
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
+    response = _generate_content_with_retry(
+        model=MODEL_NAME,
         contents=prompt
     )
 
     return response.text
+
+
+# =========================================================
+# Structured remediation proposal
+# =========================================================
 
 def propose_remediation(
     incident_title: str,
@@ -229,48 +372,48 @@ def propose_remediation(
     """
 
     prompt = f"""
-    You are assisting with a software operations incident.
+You are assisting with a software operations incident.
 
-    Incident title:
-    {incident_title}
+Incident title:
+{incident_title}
 
-    Affected service:
-    {service}
+Affected service:
+{service}
 
-    Current incident hypothesis:
-    {hypothesis}
+Current incident hypothesis:
+{hypothesis}
 
-    Supporting operational evidence:
-    {evidence}
+Supporting operational evidence:
+{evidence}
 
-    Propose exactly one concrete remediation action.
+Propose exactly one concrete remediation action.
 
-    Follow these rules:
+Follow these rules:
 
-    1. Base the action only on the supplied hypothesis
-       and evidence.
+1. Base the action only on the supplied hypothesis
+   and evidence.
 
-    2. Do not execute the action.
+2. Do not execute the action.
 
-    3. Do not decide whether the action is safe.
+3. Do not decide whether the action is safe.
 
-    4. Do not decide whether human approval is required.
+4. Do not decide whether human approval is required.
 
-    5. Use a concise machine-readable action type.
+5. Use a concise machine-readable action type.
 
-    Examples of action types:
-    - rollback_deployment
-    - inspect_configuration
-    - restart_service
-    - rotate_credential
+Examples of action types:
+- rollback_deployment
+- inspect_configuration
+- restart_service
+- rotate_credential
 
-    6. Put action-specific values inside parameters.
+6. Put action-specific values inside parameters.
 
-    7. Provide a concise rationale grounded in the evidence.
-    """
+7. Provide a concise rationale grounded in the evidence.
+"""
 
-    response = client.models.generate_content(
-        model="gemini-3.6-flash",
+    response = _generate_content_with_retry(
+        model=MODEL_NAME,
         contents=prompt,
         config={
             "response_mime_type": "application/json",

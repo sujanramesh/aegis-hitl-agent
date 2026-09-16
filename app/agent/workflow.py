@@ -13,6 +13,7 @@ from app.tools.log_search import search_logs
 from app.llm.gemini import (
     analyze_evidence,
     propose_remediation,
+    LLMUnavailableError,
 )
 
 
@@ -96,38 +97,60 @@ def analyze_incident(state: AgentState) -> dict:
     """
     Analyze accumulated evidence and generate
     a grounded incident hypothesis.
+
+    If the configured LLM provider remains unavailable
+    after controlled retries, move the workflow into a
+    safe failure state instead of propagating the provider
+    exception through the graph.
     """
 
-    hypothesis = analyze_evidence(
-        incident_title=state.incident_title,
-        incident_description=state.incident_description,
-        service=state.service,
-        evidence=state.evidence
-    )
+    try:
+        hypothesis = analyze_evidence(
+            incident_title=state.incident_title,
+            incident_description=state.incident_description,
+            service=state.service,
+            evidence=state.evidence
+        )
 
-    return {
-        "hypothesis": hypothesis,
-        "status": "analyzed"
-    }
+        return {
+            "hypothesis": hypothesis,
+            "status": "analyzed"
+        }
+
+    except LLMUnavailableError:
+        return {
+            "hypothesis": None,
+            "status": "llm_unavailable"
+        }
 
 
 def propose_action(state: AgentState) -> dict:
     """
     Generate a structured remediation action from the
     current incident hypothesis and evidence.
+
+    If the LLM becomes unavailable during remediation
+    generation, stop the reasoning path safely.
     """
 
-    action = propose_remediation(
-        incident_title=state.incident_title,
-        service=state.service,
-        hypothesis=state.hypothesis,
-        evidence=state.evidence
-    )
+    try:
+        action = propose_remediation(
+            incident_title=state.incident_title,
+            service=state.service,
+            hypothesis=state.hypothesis,
+            evidence=state.evidence
+        )
 
-    return {
-        "proposed_action": action,
-        "status": "action_proposed"
-    }
+        return {
+            "proposed_action": action,
+            "status": "action_proposed"
+        }
+
+    except LLMUnavailableError:
+        return {
+            "proposed_action": None,
+            "status": "llm_unavailable"
+        }
 
 
 # =========================================================
@@ -161,7 +184,9 @@ def await_approval(state: AgentState) -> dict:
         {
             "message": "Human approval required",
             "service": state.service,
-            "proposed_action": state.proposed_action.model_dump(),
+            "proposed_action": (
+                state.proposed_action.model_dump()
+            ),
             "risk_level": state.risk_level,
         }
     )
@@ -248,6 +273,30 @@ def verify_recovery(state: AgentState) -> dict:
 # Routing functions
 # =========================================================
 
+def route_after_analysis(state: AgentState) -> str:
+    """
+    Continue to remediation proposal only when
+    LLM analysis completed successfully.
+    """
+
+    if state.status == "llm_unavailable":
+        return "failed"
+
+    return "continue"
+
+
+def route_after_action_proposal(state: AgentState) -> str:
+    """
+    Continue to risk assessment only when the
+    LLM successfully produced a remediation action.
+    """
+
+    if state.status == "llm_unavailable":
+        return "failed"
+
+    return "continue"
+
+
 def route_after_risk_assessment(state: AgentState) -> str:
     """
     Route according to the application-owned
@@ -290,7 +339,9 @@ def route_after_execution(state: AgentState) -> str:
 # Build workflow graph
 # =========================================================
 
-workflow_builder = StateGraph(AgentState)
+workflow_builder = StateGraph(
+    AgentState
+)
 
 
 # =========================================================
@@ -377,19 +428,37 @@ workflow_builder.add_edge(
     "collect_logs"
 )
 
+
+# =========================================================
+# LLM analysis routing
+# =========================================================
+
 workflow_builder.add_edge(
     "collect_logs",
     "analyze_incident"
 )
 
-workflow_builder.add_edge(
+workflow_builder.add_conditional_edges(
     "analyze_incident",
-    "propose_action"
+    route_after_analysis,
+    {
+        "continue": "propose_action",
+        "failed": END
+    }
 )
 
-workflow_builder.add_edge(
+
+# =========================================================
+# LLM remediation routing
+# =========================================================
+
+workflow_builder.add_conditional_edges(
     "propose_action",
-    "assess_risk"
+    route_after_action_proposal,
+    {
+        "continue": "assess_risk",
+        "failed": END
+    }
 )
 
 
