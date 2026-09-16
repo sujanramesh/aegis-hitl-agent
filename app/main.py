@@ -4,6 +4,7 @@ from app.models import IncidentRequest
 from app.tools.service_health import get_service_health
 from app.tools.deployments import get_recent_deployments
 from app.tools.log_search import search_logs
+from app.llm.gemini import investigate_incident
 
 
 app = FastAPI(
@@ -23,9 +24,27 @@ def health_check():
 
 @app.post("/incidents")
 def create_incident(incident: IncidentRequest):
+
+    investigation_prompt = f"""
+    Investigate the following operational incident.
+
+    Incident title: {incident.title}
+    Description: {incident.description}
+    Affected service: {incident.service}
+
+    Use the available operational tools to gather evidence.
+    Base your conclusions only on the evidence you retrieve.
+    Clearly distinguish observations from hypotheses.
+    Do not claim causation unless the evidence establishes it.
+    """
+
+    investigation = investigate_incident(
+        investigation_prompt
+    )
+
     return {
-        "message": "Incident received",
-        "incident": incident
+        "incident": incident,
+        "investigation": investigation
     }
 
 
