@@ -215,3 +215,57 @@ Uncertainties:
     )
 
     return response.text
+
+def propose_remediation(
+    incident_title: str,
+    service: str,
+    hypothesis: str,
+    evidence: list
+) -> str:
+    """
+    Propose a remediation action based on the current
+    incident hypothesis and supporting evidence.
+    """
+
+    prompt = f"""
+    You are assisting with a software operations incident.
+
+    Incident title:
+    {incident_title}
+
+    Affected service:
+    {service}
+
+    Current incident hypothesis:
+    {hypothesis}
+
+    Supporting operational evidence:
+    {evidence}
+
+    Propose one concrete remediation action that could help
+    resolve or further diagnose this incident.
+
+    Follow these rules:
+
+    1. Base the action only on the supplied hypothesis
+       and evidence.
+
+    2. Propose exactly one action.
+
+    3. Do not execute the action.
+
+    4. Do not decide whether the action is safe.
+
+    5. Do not decide whether human approval is required.
+
+    6. Keep the action concise and operationally specific.
+
+    Return only the proposed action.
+    """
+
+    response = client.models.generate_content(
+        model="gemini-3.6-flash",
+        contents=prompt
+    )
+
+    return response.text.strip()

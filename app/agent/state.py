@@ -1,7 +1,7 @@
 from operator import add
 from typing import Annotated, Any
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class AgentState(BaseModel):
@@ -18,10 +18,12 @@ class AgentState(BaseModel):
     evidence: Annotated[
         list[dict[str, Any]],
         add
-    ] = []
+    ] = Field(default_factory=list)
 
     hypothesis: str | None = None
 
     proposed_action: str | None = None
+
+    risk_level: str | None = None
 
     requires_approval: bool = False
