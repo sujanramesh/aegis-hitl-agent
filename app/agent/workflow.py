@@ -12,6 +12,10 @@ from app.tools.service_health import get_service_health
 from app.tools.deployments import get_recent_deployments
 from app.tools.log_search import search_logs
 
+from app.retrieval.semantic_retriever import semantic_search
+from app.retrieval.runbooks import retrieve_runbook
+from app.retrieval.embeddings import EmbeddingUnavailableError
+
 from app.llm.gemini import (
     analyze_evidence,
     propose_remediation,
@@ -89,6 +93,70 @@ def collect_logs(state: AgentState) -> dict:
             }
         ]
     }
+
+
+def collect_runbook(state: AgentState) -> dict:
+    """
+    Retrieve operational knowledge relevant to the incident.
+
+    Semantic retrieval is the primary retrieval mechanism.
+
+    If the embedding provider remains unavailable after
+    bounded retries, Aegis falls back to deterministic
+    service-scoped runbook retrieval.
+
+    Retrieved runbook content is reference knowledge only.
+    It is not observed incident evidence and does not
+    authorize execution.
+    """
+
+    query = (
+        f"Service: {state.service}\n"
+        f"Incident title: {state.incident_title}\n"
+        f"Incident description: {state.incident_description}"
+    )
+
+    try:
+        results = semantic_search(
+            query=query,
+            top_k=3,
+        )
+
+        return {
+            "evidence": [
+                {
+                    "source": "operational_runbook",
+                    "retrieval_method": "semantic_search",
+                    "query": query,
+                    "data": results,
+                }
+            ]
+        }
+
+    except EmbeddingUnavailableError:
+
+        print(
+            "[Aegis Retrieval] Semantic retrieval unavailable. "
+            "Falling back to deterministic service runbook retrieval."
+        )
+
+        fallback = retrieve_runbook(
+            state.service
+        )
+
+        return {
+            "evidence": [
+                {
+                    "source": "operational_runbook",
+                    "retrieval_method": (
+                        "deterministic_service_fallback"
+                    ),
+                    "query": query,
+                    "semantic_retrieval_available": False,
+                    "data": fallback,
+                }
+            ]
+        }
 
 
 # =========================================================
@@ -371,6 +439,11 @@ workflow_builder.add_node(
 )
 
 workflow_builder.add_node(
+    "collect_runbook",
+    collect_runbook
+)
+
+workflow_builder.add_node(
     "analyze_incident",
     analyze_incident
 )
@@ -430,13 +503,18 @@ workflow_builder.add_edge(
     "collect_logs"
 )
 
+workflow_builder.add_edge(
+    "collect_logs",
+    "collect_runbook"
+)
+
 
 # =========================================================
 # LLM analysis routing
 # =========================================================
 
 workflow_builder.add_edge(
-    "collect_logs",
+    "collect_runbook",
     "analyze_incident"
 )
 
