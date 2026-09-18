@@ -21,3 +21,7 @@ htmlcov/
 
 # Logs
 *.log
+
+aegis_checkpoints.sqlite
+aegis_checkpoints.sqlite-shm
+aegis_checkpoints.sqlite-wal

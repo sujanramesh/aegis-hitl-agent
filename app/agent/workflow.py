@@ -1,6 +1,8 @@
+import sqlite3
+
 from langgraph.graph import StateGraph, START, END
 from langgraph.types import interrupt
-from langgraph.checkpoint.memory import InMemorySaver
+from langgraph.checkpoint.sqlite import SqliteSaver
 
 from app.agent.state import AgentState
 from app.agent.risk import assess_action_risk
@@ -520,10 +522,17 @@ workflow_builder.add_edge(
 
 
 # =========================================================
-# Checkpointing
+# Durable checkpointing
 # =========================================================
 
-checkpointer = InMemorySaver()
+checkpoint_connection = sqlite3.connect(
+    "aegis_checkpoints.sqlite",
+    check_same_thread=False,
+)
+
+checkpointer = SqliteSaver(
+    checkpoint_connection
+)
 
 workflow = workflow_builder.compile(
     checkpointer=checkpointer
