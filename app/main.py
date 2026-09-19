@@ -1,9 +1,16 @@
 import json
+import logging
+from time import perf_counter
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.responses import Response
 from fastapi.security import OAuth2PasswordRequestForm
 from langgraph.types import Command
+from prometheus_client import (
+    CONTENT_TYPE_LATEST,
+    generate_latest,
+)
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -32,6 +39,32 @@ from app.auth.security import (
 from app.auth.users import get_user
 from app.auth.dependencies import require_roles
 
+from app.observability.logging import (
+    configure_logging,
+    get_logger,
+    log_event,
+)
+from app.observability.middleware import ObservabilityMiddleware
+from app.observability.metrics import (
+    INCIDENTS_TOTAL,
+    APPROVAL_REQUESTS_TOTAL,
+    APPROVAL_DECISIONS_TOTAL,
+    ACTION_EXECUTIONS_TOTAL,
+    RECOVERY_VERIFICATIONS_TOTAL,
+    WORKFLOW_DURATION_SECONDS,
+)
+
+
+# =========================================================
+# Observability configuration
+# =========================================================
+
+configure_logging()
+
+logger = get_logger(
+    "aegis.api"
+)
+
 
 # =========================================================
 # FastAPI application
@@ -43,7 +76,16 @@ app = FastAPI(
         "Human-in-the-Loop AI Operations Agent "
         "for safe incident investigation and remediation."
     ),
-    version="0.6.0",
+    version="0.7.0",
+)
+
+
+# =========================================================
+# Middleware
+# =========================================================
+
+app.add_middleware(
+    ObservabilityMiddleware
 )
 
 
@@ -123,6 +165,106 @@ def serialize_workflow_result(
     }
 
 
+def get_action_type(
+    result: dict,
+) -> str:
+    """
+    Safely extract the proposed remediation action type
+    for metrics and structured logs.
+    """
+
+    proposed_action = result.get(
+        "proposed_action"
+    )
+
+    if proposed_action is None:
+        return "unknown"
+
+    if hasattr(
+        proposed_action,
+        "action_type",
+    ):
+        return str(
+            proposed_action.action_type
+        )
+
+    if isinstance(
+        proposed_action,
+        dict,
+    ):
+        return str(
+            proposed_action.get(
+                "action_type",
+                "unknown",
+            )
+        )
+
+    return "unknown"
+
+
+def get_execution_outcome(
+    execution_result,
+) -> str:
+    """
+    Convert execution output into a bounded metric label.
+    """
+
+    if not isinstance(
+        execution_result,
+        dict,
+    ):
+        return "unknown"
+
+    success = execution_result.get(
+        "success"
+    )
+
+    if success is True:
+        return "success"
+
+    if success is False:
+        return "failure"
+
+    return "unknown"
+
+
+def get_verification_outcome(
+    verification_result,
+) -> str:
+    """
+    Convert recovery verification output into a bounded
+    metric label.
+    """
+
+    if not isinstance(
+        verification_result,
+        dict,
+    ):
+        return "unknown"
+
+    if verification_result.get(
+        "recovered"
+    ) is True:
+        return "recovered"
+
+    if verification_result.get(
+        "recovered"
+    ) is False:
+        return "not_recovered"
+
+    if verification_result.get(
+        "healthy"
+    ) is True:
+        return "recovered"
+
+    if verification_result.get(
+        "healthy"
+    ) is False:
+        return "not_recovered"
+
+    return "unknown"
+
+
 # =========================================================
 # System health
 # =========================================================
@@ -140,6 +282,21 @@ def health_check():
         "status": "healthy",
         "service": "aegis",
     }
+
+
+@app.get("/metrics")
+def metrics():
+    """
+    Expose Prometheus-compatible Aegis metrics.
+
+    This endpoint will later be scraped by the
+    production monitoring system.
+    """
+
+    return Response(
+        content=generate_latest(),
+        media_type=CONTENT_TYPE_LATEST,
+    )
 
 
 # =========================================================
@@ -162,9 +319,15 @@ def login(
         form_data.username
     )
 
-    # Use the same response for unknown users and invalid
-    # passwords to avoid revealing whether an account exists.
     if user is None:
+        log_event(
+            logger,
+            logging.WARNING,
+            "authentication_failed",
+            username=form_data.username,
+            reason="invalid_credentials",
+        )
+
         raise HTTPException(
             status_code=401,
             detail=(
@@ -180,6 +343,14 @@ def login(
         form_data.password,
         user.hashed_password,
     ):
+        log_event(
+            logger,
+            logging.WARNING,
+            "authentication_failed",
+            username=form_data.username,
+            reason="invalid_credentials",
+        )
+
         raise HTTPException(
             status_code=401,
             detail=(
@@ -192,6 +363,14 @@ def login(
         )
 
     if user.disabled:
+        log_event(
+            logger,
+            logging.WARNING,
+            "authentication_failed",
+            username=user.username,
+            reason="disabled_account",
+        )
+
         raise HTTPException(
             status_code=403,
             detail=(
@@ -201,6 +380,14 @@ def login(
 
     access_token = create_access_token(
         username=user.username,
+        role=user.role,
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "authentication_succeeded",
+        actor=user.username,
         role=user.role,
     )
 
@@ -234,8 +421,26 @@ def create_incident(
     persisted to MySQL.
     """
 
+    workflow_started_at = (
+        perf_counter()
+    )
+
     thread_id = str(
         uuid4()
+    )
+
+    INCIDENTS_TOTAL.labels(
+        service=incident.service,
+    ).inc()
+
+    log_event(
+        logger,
+        logging.INFO,
+        "incident_created",
+        incident_id=thread_id,
+        service=incident.service,
+        actor=current_user.username,
+        role=current_user.role,
     )
 
     # -----------------------------------------------------
@@ -281,9 +486,32 @@ def create_incident(
         ),
     }
 
+    log_event(
+        logger,
+        logging.INFO,
+        "investigation_started",
+        incident_id=thread_id,
+        service=incident.service,
+    )
+
+    investigation_started_at = (
+        perf_counter()
+    )
+
     result = workflow.invoke(
         initial_state,
         config=config,
+    )
+
+    investigation_duration = (
+        perf_counter()
+        - investigation_started_at
+    )
+
+    WORKFLOW_DURATION_SECONDS.labels(
+        operation="investigation",
+    ).observe(
+        investigation_duration
     )
 
     # -----------------------------------------------------
@@ -293,6 +521,18 @@ def create_incident(
     final_status = result.get(
         "status",
         "unknown",
+    )
+
+    risk_level = (
+        result.get(
+            "risk_level"
+        )
+        or "unknown"
+    )
+
+    requires_approval = result.get(
+        "requires_approval",
+        False,
     )
 
     update_incident_status(
@@ -317,22 +557,35 @@ def create_incident(
                 "risk_level"
             ),
             "requires_approval": (
-                result.get(
-                    "requires_approval",
-                    False,
-                )
+                requires_approval
             ),
         }),
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "investigation_completed",
+        incident_id=thread_id,
+        service=incident.service,
+        status=final_status,
+        risk_level=risk_level,
+        requires_approval=requires_approval,
+        duration_ms=round(
+            investigation_duration * 1000,
+            2,
+        ),
     )
 
     # -----------------------------------------------------
     # Record approval requirement
     # -----------------------------------------------------
 
-    if result.get(
-        "requires_approval",
-        False,
-    ):
+    if requires_approval:
+        APPROVAL_REQUESTS_TOTAL.labels(
+            risk_level=risk_level,
+        ).inc()
+
         create_audit_event(
             db=db,
             incident_id=thread_id,
@@ -347,6 +600,45 @@ def create_incident(
                 "status": final_status,
             }),
         )
+
+        log_event(
+            logger,
+            logging.INFO,
+            "approval_requested",
+            incident_id=thread_id,
+            service=incident.service,
+            risk_level=risk_level,
+            action_type=get_action_type(
+                result
+            ),
+        )
+
+    request_workflow_duration = (
+        perf_counter()
+        - workflow_started_at
+    )
+
+    WORKFLOW_DURATION_SECONDS.labels(
+        operation="incident_creation",
+    ).observe(
+        request_workflow_duration
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "incident_processing_paused"
+        if requires_approval
+        else "incident_processing_completed",
+        incident_id=thread_id,
+        service=incident.service,
+        status=final_status,
+        duration_ms=round(
+            request_workflow_duration
+            * 1000,
+            2,
+        ),
+    )
 
     return serialize_workflow_result(
         thread_id,
@@ -387,6 +679,14 @@ def get_incident(
     )
 
     if not snapshot.values:
+        log_event(
+            logger,
+            logging.WARNING,
+            "incident_not_found",
+            incident_id=thread_id,
+            actor=current_user.username,
+        )
+
         raise HTTPException(
             status_code=404,
             detail="Incident not found.",
@@ -400,6 +700,18 @@ def get_incident(
         result[
             "__interrupt__"
         ] = True
+
+    log_event(
+        logger,
+        logging.INFO,
+        "incident_retrieved",
+        incident_id=thread_id,
+        actor=current_user.username,
+        role=current_user.role,
+        status=result.get(
+            "status"
+        ),
+    )
 
     return serialize_workflow_result(
         thread_id,
@@ -436,6 +748,10 @@ def submit_decision(
     trail.
     """
 
+    decision_started_at = (
+        perf_counter()
+    )
+
     config = build_config(
         thread_id
     )
@@ -445,12 +761,29 @@ def submit_decision(
     )
 
     if not snapshot.values:
+        log_event(
+            logger,
+            logging.WARNING,
+            "decision_incident_not_found",
+            incident_id=thread_id,
+            actor=current_user.username,
+        )
+
         raise HTTPException(
             status_code=404,
             detail="Incident not found.",
         )
 
     if not snapshot.next:
+        log_event(
+            logger,
+            logging.WARNING,
+            "decision_rejected_by_state",
+            incident_id=thread_id,
+            actor=current_user.username,
+            reason="not_awaiting_decision",
+        )
+
         raise HTTPException(
             status_code=409,
             detail=(
@@ -475,6 +808,10 @@ def submit_decision(
             "HUMAN_REJECTED"
         )
 
+    APPROVAL_DECISIONS_TOTAL.labels(
+        decision=decision.decision,
+    ).inc()
+
     create_audit_event(
         db=db,
         incident_id=thread_id,
@@ -487,9 +824,32 @@ def submit_decision(
         }),
     )
 
+    log_event(
+        logger,
+        logging.INFO,
+        "human_decision_recorded",
+        incident_id=thread_id,
+        actor=current_user.username,
+        role=current_user.role,
+        decision=decision.decision,
+    )
+
     # -----------------------------------------------------
     # Resume the same LangGraph workflow
     # -----------------------------------------------------
+
+    resume_started_at = (
+        perf_counter()
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "workflow_resume_started",
+        incident_id=thread_id,
+        actor=current_user.username,
+        decision=decision.decision,
+    )
 
     result = workflow.invoke(
         Command(
@@ -505,9 +865,32 @@ def submit_decision(
         config=config,
     )
 
+    resume_duration = (
+        perf_counter()
+        - resume_started_at
+    )
+
+    WORKFLOW_DURATION_SECONDS.labels(
+        operation="decision_resume",
+    ).observe(
+        resume_duration
+    )
+
     final_status = result.get(
         "status",
         "unknown",
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "workflow_resume_completed",
+        incident_id=thread_id,
+        status=final_status,
+        duration_ms=round(
+            resume_duration * 1000,
+            2,
+        ),
     )
 
     # -----------------------------------------------------
@@ -529,6 +912,21 @@ def submit_decision(
     )
 
     if execution_result is not None:
+        action_type = get_action_type(
+            result
+        )
+
+        execution_outcome = (
+            get_execution_outcome(
+                execution_result
+            )
+        )
+
+        ACTION_EXECUTIONS_TOTAL.labels(
+            action_type=action_type,
+            outcome=execution_outcome,
+        ).inc()
+
         create_audit_event(
             db=db,
             incident_id=thread_id,
@@ -539,6 +937,15 @@ def submit_decision(
             details=json.dumps(
                 execution_result
             ),
+        )
+
+        log_event(
+            logger,
+            logging.INFO,
+            "action_executed",
+            incident_id=thread_id,
+            action_type=action_type,
+            outcome=execution_outcome,
         )
 
     # -----------------------------------------------------
@@ -553,6 +960,16 @@ def submit_decision(
         verification_result
         is not None
     ):
+        verification_outcome = (
+            get_verification_outcome(
+                verification_result
+            )
+        )
+
+        RECOVERY_VERIFICATIONS_TOTAL.labels(
+            outcome=verification_outcome,
+        ).inc()
+
         create_audit_event(
             db=db,
             incident_id=thread_id,
@@ -563,6 +980,14 @@ def submit_decision(
             details=json.dumps(
                 verification_result
             ),
+        )
+
+        log_event(
+            logger,
+            logging.INFO,
+            "recovery_verified",
+            incident_id=thread_id,
+            outcome=verification_outcome,
         )
 
     # -----------------------------------------------------
@@ -587,6 +1012,33 @@ def submit_decision(
                 current_user.username
             ),
         }),
+    )
+
+    decision_duration = (
+        perf_counter()
+        - decision_started_at
+    )
+
+    WORKFLOW_DURATION_SECONDS.labels(
+        operation="decision_processing",
+    ).observe(
+        decision_duration
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "workflow_completed",
+        incident_id=thread_id,
+        status=final_status,
+        approval_decision=result.get(
+            "approval_decision"
+        ),
+        authorized_by=current_user.username,
+        duration_ms=round(
+            decision_duration * 1000,
+            2,
+        ),
     )
 
     return serialize_workflow_result(
