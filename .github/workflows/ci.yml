@@ -21,8 +21,6 @@ jobs:
     timeout-minutes: 10
 
     env:
-      # Safe, non-production values used only so modules that
-      # validate configuration at import time can be loaded.
       JWT_SECRET_KEY: ci-test-jwt-secret-not-for-production
       GEMINI_API_KEY: ci-test-gemini-key
       LANGGRAPH_STRICT_MSGPACK: "true"
@@ -107,3 +105,25 @@ jobs:
             --build-arg VITE_API_BASE_URL=/api \
             --build-arg VITE_APP_ENV=Production \
             ./frontend
+
+  # =========================================================
+  # Deployment Gate
+  # =========================================================
+  deployment-ready:
+    name: Deployment Ready
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+
+    needs:
+      - backend-tests
+      - frontend-build
+      - docker-build
+
+    steps:
+      - name: Confirm deployment readiness
+        run: |
+          echo "All Aegis CI quality gates passed."
+          echo "Backend tests: PASSED"
+          echo "Frontend build: PASSED"
+          echo "Docker builds: PASSED"
+          echo "Aegis is ready for deployment."
