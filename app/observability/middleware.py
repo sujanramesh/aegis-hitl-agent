@@ -22,6 +22,36 @@ from app.observability.metrics import (
 logger = get_logger("aegis.http")
 
 
+def get_metric_path(request: Request) -> str:
+    """
+    Return a bounded route template for Prometheus labels.
+
+    Dynamic request paths such as:
+
+        /incidents/abc-123
+
+    become:
+
+        /incidents/{thread_id}
+
+    This prevents high-cardinality metric labels while
+    structured logs can still retain the concrete request path.
+    """
+
+    route = request.scope.get("route")
+
+    route_path = getattr(
+        route,
+        "path",
+        None,
+    )
+
+    if route_path:
+        return str(route_path)
+
+    return "unmatched"
+
+
 class ObservabilityMiddleware(BaseHTTPMiddleware):
 
     async def dispatch(
@@ -63,9 +93,13 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                 2,
             )
 
+            metric_path = get_metric_path(
+                request
+            )
+
             HTTP_REQUESTS_TOTAL.labels(
                 method=request.method,
-                path=request.url.path,
+                path=metric_path,
                 status_code=str(
                     response.status_code
                 ),
@@ -73,7 +107,7 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
 
             HTTP_REQUEST_DURATION_SECONDS.labels(
                 method=request.method,
-                path=request.url.path,
+                path=metric_path,
             ).observe(
                 duration_seconds
             )
@@ -84,6 +118,7 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                 "http_request_completed",
                 method=request.method,
                 path=request.url.path,
+                route=metric_path,
                 status_code=response.status_code,
                 duration_ms=duration_ms,
             )
@@ -105,15 +140,19 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                 2,
             )
 
+            metric_path = get_metric_path(
+                request
+            )
+
             HTTP_REQUESTS_TOTAL.labels(
                 method=request.method,
-                path=request.url.path,
+                path=metric_path,
                 status_code="500",
             ).inc()
 
             HTTP_REQUEST_DURATION_SECONDS.labels(
                 method=request.method,
-                path=request.url.path,
+                path=metric_path,
             ).observe(
                 duration_seconds
             )
@@ -127,6 +166,7 @@ class ObservabilityMiddleware(BaseHTTPMiddleware):
                         ),
                         "method": request.method,
                         "path": request.url.path,
+                        "route": metric_path,
                         "duration_ms": duration_ms,
                     }
                 },

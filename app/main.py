@@ -1,9 +1,11 @@
 import json
 import logging
+import os
 from time import perf_counter
 from uuid import uuid4
 
 from fastapi import FastAPI, HTTPException, Depends
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import Response
 from fastapi.security import OAuth2PasswordRequestForm
 from langgraph.types import Command
@@ -11,6 +13,7 @@ from prometheus_client import (
     CONTENT_TYPE_LATEST,
     generate_latest,
 )
+
 from sqlalchemy.orm import Session
 
 from app.models import (
@@ -28,7 +31,9 @@ from app.database.connection import get_db
 from app.database.repository import (
     create_incident as create_incident_record,
     update_incident_status,
+    list_incidents,
     create_audit_event,
+    list_audit_events,
 )
 
 from app.auth.models import Token, User
@@ -36,6 +41,7 @@ from app.auth.security import (
     create_access_token,
     verify_password,
 )
+
 from app.auth.users import get_user
 from app.auth.dependencies import require_roles
 
@@ -44,8 +50,11 @@ from app.observability.logging import (
     get_logger,
     log_event,
 )
+
 from app.observability.middleware import ObservabilityMiddleware
 from app.observability.metrics import (
+    HTTP_REQUESTS_TOTAL,
+    HTTP_REQUEST_DURATION_SECONDS,
     INCIDENTS_TOTAL,
     APPROVAL_REQUESTS_TOTAL,
     APPROVAL_DECISIONS_TOTAL,
@@ -76,13 +85,30 @@ app = FastAPI(
         "Human-in-the-Loop AI Operations Agent "
         "for safe incident investigation and remediation."
     ),
-    version="0.7.0",
+    version="0.8.0",
 )
+
+cors_origins = [
+    origin.strip()
+    for origin in os.getenv(
+        "CORS_ORIGINS",
+        "http://localhost:5173,http://127.0.0.1:5173",
+    ).split(",")
+    if origin.strip()
+]
 
 
 # =========================================================
 # Middleware
 # =========================================================
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=cors_origins,
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 app.add_middleware(
     ObservabilityMiddleware
@@ -112,6 +138,10 @@ def serialize_workflow_result(
 ) -> dict:
     """
     Convert LangGraph state into an API-safe response.
+
+    Includes incident context, investigation evidence,
+    remediation state, approval state, execution output,
+    and recovery verification.
     """
 
     proposed_action = result.get(
@@ -136,29 +166,59 @@ def serialize_workflow_result(
 
     return {
         "incident_id": thread_id,
+
+        "title": result.get(
+            "incident_title"
+        ),
+
+        "description": result.get(
+            "incident_description"
+        ),
+
+        "service": result.get(
+            "service"
+        ),
+
         "status": result.get(
             "status"
         ),
+
+        "evidence": result.get(
+            "evidence",
+            [],
+        ),
+
         "hypothesis": result.get(
             "hypothesis"
         ),
+
         "proposed_action": proposed_action,
+
         "risk_level": result.get(
             "risk_level"
         ),
+
         "requires_approval": result.get(
             "requires_approval",
             False,
         ),
+
         "awaiting_approval": (
             awaiting_approval
         ),
+
         "approval_decision": result.get(
             "approval_decision"
         ),
+
+        "approval_reason": result.get(
+            "approval_reason"
+        ),
+
         "execution_result": result.get(
             "execution_result"
         ),
+
         "verification_result": result.get(
             "verification_result"
         ),
@@ -264,6 +324,102 @@ def get_verification_outcome(
 
     return "unknown"
 
+def get_counter_samples(
+    metric,
+) -> list[dict]:
+    """
+    Convert a Prometheus Counter into JSON-safe samples.
+    """
+
+    samples = []
+
+    for metric_family in metric.collect():
+        for sample in metric_family.samples:
+            if not sample.name.endswith(
+                "_total"
+            ):
+                continue
+
+            samples.append({
+                "labels": dict(
+                    sample.labels
+                ),
+                "value": sample.value,
+            })
+
+    return samples
+
+
+def get_histogram_summary(
+    metric,
+) -> list[dict]:
+    """
+    Convert Prometheus Histogram count and sum values
+    into JSON-safe summaries grouped by labels.
+    """
+
+    summaries = {}
+
+    for metric_family in metric.collect():
+        for sample in metric_family.samples:
+            labels = dict(
+                sample.labels
+            )
+
+            key = tuple(
+                sorted(
+                    labels.items()
+                )
+            )
+
+            if key not in summaries:
+                summaries[key] = {
+                    "labels": labels,
+                    "count": 0,
+                    "sum": 0.0,
+                }
+
+            if sample.name.endswith(
+                "_count"
+            ):
+                summaries[key]["count"] = (
+                    sample.value
+                )
+
+            elif sample.name.endswith(
+                "_sum"
+            ):
+                summaries[key]["sum"] = (
+                    sample.value
+                )
+
+    result = []
+
+    for summary in summaries.values():
+        count = summary["count"]
+        total = summary["sum"]
+
+        average = (
+            total / count
+            if count
+            else 0.0
+        )
+
+        result.append({
+            "labels": summary["labels"],
+            "count": count,
+            "sum_seconds": round(
+                total,
+                6,
+            ),
+            "average_seconds": round(
+                average,
+                6,
+            ),
+        })
+
+    return result
+
 
 # =========================================================
 # System health
@@ -297,6 +453,61 @@ def metrics():
         content=generate_latest(),
         media_type=CONTENT_TYPE_LATEST,
     )
+
+@app.get("/observability/summary")
+def observability_summary(
+    current_user: User = Depends(
+        require_roles(
+            "viewer",
+            "operator",
+            "approver",
+        )
+    ),
+):
+    """
+    Return authenticated JSON operational metrics for
+    the Aegis frontend observability dashboard.
+
+    Prometheus remains the monitoring source of truth.
+    This endpoint provides a frontend-friendly projection.
+    """
+
+    summary = {
+        "http_requests": get_counter_samples(
+            HTTP_REQUESTS_TOTAL
+        ),
+        "http_latency": get_histogram_summary(
+            HTTP_REQUEST_DURATION_SECONDS
+        ),
+        "incidents": get_counter_samples(
+            INCIDENTS_TOTAL
+        ),
+        "approval_requests": get_counter_samples(
+            APPROVAL_REQUESTS_TOTAL
+        ),
+        "approval_decisions": get_counter_samples(
+            APPROVAL_DECISIONS_TOTAL
+        ),
+        "action_executions": get_counter_samples(
+            ACTION_EXECUTIONS_TOTAL
+        ),
+        "recovery_verifications": get_counter_samples(
+            RECOVERY_VERIFICATIONS_TOTAL
+        ),
+        "workflow_latency": get_histogram_summary(
+            WORKFLOW_DURATION_SECONDS
+        ),
+    }
+
+    log_event(
+        logger,
+        logging.INFO,
+        "observability_summary_retrieved",
+        actor=current_user.username,
+        role=current_user.role,
+    )
+
+    return summary
 
 
 # =========================================================
@@ -395,6 +606,29 @@ def login(
         access_token=access_token,
         token_type="bearer",
     )
+
+
+@app.get(
+    "/auth/me",
+    response_model=User,
+)
+def get_authenticated_user(
+    current_user: User = Depends(
+        require_roles(
+            "viewer",
+            "operator",
+            "approver",
+        )
+    ),
+):
+    """
+    Return the currently authenticated Aegis user.
+
+    The frontend uses this endpoint to establish the
+    authenticated session and determine role-aware UI state.
+    """
+
+    return current_user
 
 
 # =========================================================
@@ -647,8 +881,68 @@ def create_incident(
 
 
 # =========================================================
-# Retrieve incident
+# Retrieve incidents
 # =========================================================
+
+@app.get("/incidents")
+def get_incidents(
+    limit: int = 50,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_roles(
+            "viewer",
+            "operator",
+            "approver",
+        )
+    ),
+):
+    """
+    Return persisted incidents ordered from newest to oldest.
+
+    All authenticated Aegis roles may inspect the incident list.
+    MySQL is the durable source for incident summary records.
+    """
+
+    safe_limit = max(
+        1,
+        min(limit, 100),
+    )
+
+    incidents = list_incidents(
+        db,
+        limit=safe_limit,
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "incidents_listed",
+        actor=current_user.username,
+        role=current_user.role,
+        count=len(incidents),
+    )
+
+    return [
+        {
+            "incident_id": incident.id,
+            "title": incident.title,
+            "description": incident.description,
+            "service": incident.service,
+            "status": incident.status,
+            "created_at": (
+                incident.created_at.isoformat()
+                if incident.created_at
+                else None
+            ),
+            "updated_at": (
+                incident.updated_at.isoformat()
+                if incident.updated_at
+                else None
+            ),
+        }
+        for incident in incidents
+    ]
+
 
 @app.get("/incidents/{thread_id}")
 def get_incident(
@@ -1123,3 +1417,149 @@ def service_logs(
         service_name,
         query,
     )
+
+# =========================================================
+# Pending human approvals
+# =========================================================
+
+@app.get("/approvals/pending")
+def get_pending_approvals(
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_roles(
+            "viewer",
+            "operator",
+            "approver",
+        )
+    ),
+):
+    """
+    Return checkpointed incident workflows that are
+    currently paused awaiting human authorization.
+
+    MySQL provides the durable incident registry.
+    LangGraph remains the source of truth for the
+    current workflow execution state.
+
+    Historical incidents without a surviving
+    LangGraph checkpoint are skipped safely.
+    """
+
+    incidents = list_incidents(
+        db,
+        limit=100,
+    )
+
+    pending_approvals = []
+
+    for incident in incidents:
+        config = build_config(
+            incident.id
+        )
+
+        snapshot = workflow.get_state(
+            config
+        )
+
+        # Historical MySQL incidents may exist even when
+        # their LangGraph checkpoint is no longer present.
+        if not snapshot.values:
+            continue
+
+        # A workflow with no next node is not currently
+        # suspended awaiting continuation.
+        if not snapshot.next:
+            continue
+
+        result = dict(
+            snapshot.values
+        )
+
+        # Only expose workflows whose application-owned
+        # risk policy requires explicit human approval.
+        if not result.get(
+            "requires_approval",
+            False,
+        ):
+            continue
+
+        # serialize_workflow_result() determines
+        # awaiting_approval from the interrupt marker.
+        result["__interrupt__"] = True
+
+        pending_approvals.append(
+            serialize_workflow_result(
+                incident.id,
+                result,
+            )
+        )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "pending_approvals_listed",
+        actor=current_user.username,
+        role=current_user.role,
+        count=len(pending_approvals),
+    )
+
+    return pending_approvals
+
+# =========================================================
+# Audit trail
+# =========================================================
+
+@app.get("/audit-events")
+def get_audit_events(
+    limit: int = 100,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(
+        require_roles(
+            "viewer",
+            "operator",
+            "approver",
+        )
+    ),
+):
+    """
+    Return persisted operational audit events ordered
+    from newest to oldest.
+
+    All authenticated Aegis roles may inspect the audit trail.
+    MySQL is the durable source of truth for audit records.
+    """
+
+    safe_limit = max(
+        1,
+        min(limit, 500),
+    )
+
+    events = list_audit_events(
+        db,
+        limit=safe_limit,
+    )
+
+    log_event(
+        logger,
+        logging.INFO,
+        "audit_events_listed",
+        actor=current_user.username,
+        role=current_user.role,
+        count=len(events),
+    )
+
+    return [
+        {
+            "id": event.id,
+            "incident_id": event.incident_id,
+            "event_type": event.event_type,
+            "actor": event.actor,
+            "details": event.details,
+            "created_at": (
+                event.created_at.isoformat()
+                if event.created_at
+                else None
+            ),
+        }
+        for event in events
+    ]

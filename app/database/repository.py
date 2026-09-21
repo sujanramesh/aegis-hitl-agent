@@ -1,3 +1,4 @@
+from sqlalchemy import desc
 from sqlalchemy.orm import Session
 
 from app.database.entities import (
@@ -59,6 +60,20 @@ def get_incident(
     )
 
 
+def list_incidents(
+    db: Session,
+    limit: int = 50,
+) -> list[IncidentEntity]:
+    return (
+        db.query(IncidentEntity)
+        .order_by(
+            desc(IncidentEntity.created_at)
+        )
+        .limit(limit)
+        .all()
+    )
+
+
 def create_audit_event(
     db: Session,
     incident_id: str,
@@ -78,3 +93,18 @@ def create_audit_event(
     db.refresh(event)
 
     return event
+
+
+def list_audit_events(
+    db: Session,
+    limit: int = 100,
+) -> list[AuditEventEntity]:
+    return (
+        db.query(AuditEventEntity)
+        .order_by(
+            desc(AuditEventEntity.created_at),
+            desc(AuditEventEntity.id),
+        )
+        .limit(limit)
+        .all()
+    )
