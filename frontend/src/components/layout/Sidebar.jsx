@@ -76,6 +76,9 @@ export default function Sidebar({
   activePage,
   onNavigate,
 }) {
+  const environmentLabel =
+    import.meta.env.VITE_APP_ENV || "Local";
+
   return (
     <aside className="sidebar">
       <div className="brand">
@@ -145,7 +148,9 @@ export default function Sidebar({
               Environment
             </span>
 
-            <strong>Production</strong>
+            <strong>
+              {environmentLabel}
+            </strong>
           </div>
         </div>
       </div>

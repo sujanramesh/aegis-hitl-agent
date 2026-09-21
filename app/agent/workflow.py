@@ -1,3 +1,4 @@
+import os
 import sqlite3
 
 from langgraph.graph import StateGraph, START, END
@@ -598,13 +599,17 @@ workflow_builder.add_edge(
     END
 )
 
-
 # =========================================================
 # Durable checkpointing
 # =========================================================
 
-checkpoint_connection = sqlite3.connect(
+checkpoint_path = os.getenv(
+    "AEGIS_CHECKPOINT_PATH",
     "aegis_checkpoints.sqlite",
+)
+
+checkpoint_connection = sqlite3.connect(
+    checkpoint_path,
     check_same_thread=False,
 )
 
