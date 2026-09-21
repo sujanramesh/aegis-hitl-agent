@@ -13,6 +13,11 @@ jobs:
     name: Backend Tests
     runs-on: ubuntu-latest
 
+    env:
+      JWT_SECRET_KEY: ci-test-jwt-secret-not-for-production
+      GEMINI_API_KEY: ci-test-gemini-key
+      LANGGRAPH_STRICT_MSGPACK: "true"
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
