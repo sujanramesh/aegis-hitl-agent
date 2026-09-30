@@ -2,6 +2,7 @@ import { Plus } from "lucide-react";
 import { useEffect, useState } from "react";
 
 import MetricCard from "../components/common/MetricCard";
+import WorkflowGraphic from "../components/common/WorkflowGraphic";
 import ApprovalCard from "../components/approvals/ApprovalCard";
 import ActiveIncident from "../components/incidents/ActiveIncident";
 import AgentTimeline from "../components/incidents/AgentTimeline";
@@ -9,8 +10,10 @@ import NewIncidentModal from "../components/incidents/NewIncidentModal";
 import ServiceHealth from "../components/incidents/ServiceHealth";
 import { useAuth } from "../context/AuthContext";
 import {
+  getAuditEvents,
   getIncident,
   getIncidents,
+  getPendingApprovals,
 } from "../services/api.js";
 
 export default function Overview() {
@@ -27,6 +30,12 @@ export default function Overview() {
 
   const [incidentLoadError, setIncidentLoadError] =
     useState("");
+  const [summaryLoadError, setSummaryLoadError] = useState("");
+  const [approvalQueueUnavailable, setApprovalQueueUnavailable] = useState(false);
+  const [auditStreamUnavailable, setAuditStreamUnavailable] = useState(false);
+  const [recentIncidents, setRecentIncidents] = useState([]);
+  const [pendingApprovals, setPendingApprovals] = useState([]);
+  const [recentEvents, setRecentEvents] = useState([]);
 
   const canCreateIncident = hasRole(
     "operator",
@@ -38,11 +47,48 @@ export default function Overview() {
       try {
         setIncidentLoadError("");
 
-        const incidents =
-          await getIncidents(1);
+        const [incidentResult, approvalResult, auditResult] =
+          await Promise.allSettled([
+            getIncidents(50),
+            getPendingApprovals(),
+            getAuditEvents(6),
+          ]);
+
+        const failedSources = [
+          [incidentResult, "incident registry"],
+          [approvalResult, "approval queue"],
+          [auditResult, "audit stream"],
+        ].filter(([result]) => result.status === "rejected");
+        setSummaryLoadError(
+          failedSources.length
+            ? `Some overview data could not be loaded: ${failedSources.map(([, source]) => source).join(", ")}.`
+            : "",
+        );
+        setApprovalQueueUnavailable(approvalResult.status === "rejected");
+        setAuditStreamUnavailable(auditResult.status === "rejected");
+
+        const incidents = incidentResult.status === "fulfilled" &&
+          Array.isArray(incidentResult.value)
+          ? incidentResult.value
+          : [];
+        setRecentIncidents(incidents);
+
+        setPendingApprovals(
+          approvalResult.status === "fulfilled" && Array.isArray(approvalResult.value)
+            ? approvalResult.value
+            : [],
+        );
+        setRecentEvents(
+          auditResult.status === "fulfilled" && Array.isArray(auditResult.value)
+            ? auditResult.value
+            : [],
+        );
+
+        if (incidentResult.status === "rejected") {
+          throw incidentResult.reason;
+        }
 
         if (
-          !Array.isArray(incidents) ||
           incidents.length === 0
         ) {
           setLatestIncident(null);
@@ -75,40 +121,38 @@ export default function Overview() {
 
   function handleIncidentCreated(incident) {
     setLatestIncident(incident);
+    setRecentIncidents((current) => [incident, ...current].slice(0, 50));
+    if (incident.awaiting_approval) {
+      setPendingApprovals((current) => [incident, ...current]);
+      setApprovalQueueUnavailable(false);
+    }
     setIncidentLoadError("");
   }
 
   function handleDecisionCompleted(
     updatedIncident
   ) {
-    setLatestIncident(updatedIncident);
+    setLatestIncident((current) =>
+      current?.incident_id === updatedIncident.incident_id
+        ? updatedIncident
+        : current,
+    );
+    setPendingApprovals((current) => current.filter(
+      (incident) => incident.incident_id !== updatedIncident.incident_id,
+    ));
   }
 
-  const isIncidentActive =
-    latestIncident &&
-    ![
-      "completed",
-      "resolved",
-      "rejected",
-      "failed",
-      "llm_unavailable",
-    ].includes(latestIncident.status);
-
-  const activeIncidentCount =
-    isIncidentActive ? "01" : "00";
-
-  const awaitingApprovalCount =
-    latestIncident?.awaiting_approval
-      ? "01"
-      : "00";
-
-  const recoveredCount =
-    latestIncident?.verification_result
-      ?.recovered === true ||
-    latestIncident?.verification_result
-      ?.healthy === true
-      ? "01"
-      : "00";
+  const terminalStatuses = ["completed", "resolved", "rejected", "failed", "llm_unavailable", "action_cancelled"];
+  const activeIncidentCount = recentIncidents.filter(
+    (incident) => !terminalStatuses.includes(incident.status),
+  ).length;
+  const resolvedIncidentCount = recentIncidents.filter(
+    (incident) => ["completed", "resolved"].includes(incident.status),
+  ).length;
+  const featuredApproval =
+    pendingApprovals.find(
+      (incident) => incident.risk_level === "high",
+    ) || pendingApprovals[0];
 
   const serviceRefreshKey = [
     latestIncident?.incident_id || "none",
@@ -116,18 +160,17 @@ export default function Overview() {
   ].join(":");
 
   return (
-    <>
+    <div className="overview-page">
       <div className="overview-heading">
         <div className="page-heading">
           <span className="eyebrow">
-            Operations
+            Operations overview
           </span>
 
-          <h1>Incident command</h1>
+          <h1>Aegis Operations</h1>
 
           <p>
-            Monitor autonomous investigations,
-            human authorization and recovery.
+            Incidents, authorization and recovery across the latest operational activity.
           </p>
         </div>
 
@@ -178,44 +221,19 @@ export default function Overview() {
           </div>
         )}
 
-      {latestIncident && (
-        <div
-          className="incident-created-banner"
-          role="status"
-        >
-          <div>
-            <strong>
-              Latest investigation
-            </strong>
-
-            <span>
-              Incident{" "}
-              {latestIncident.incident_id}
-            </span>
-          </div>
-
-          <span className="status-badge">
-            {latestIncident.awaiting_approval
-              ? "Awaiting approval"
-              : latestIncident.status?.replaceAll(
-                  "_",
-                  " "
-                )}
-          </span>
+      {!isLoadingIncident && summaryLoadError && (
+        <div className="observability-error" role="status">
+          {summaryLoadError} Displayed totals may be incomplete.
         </div>
       )}
 
       <section className="metric-grid">
         <MetricCard
           label="Active incidents"
-          value={activeIncidentCount}
-          detail={
-            isIncidentActive
-              ? "Current incident active"
-              : "No active incident"
-          }
+          value={String(activeIncidentCount).padStart(2, "0")}
+          detail="In latest 50 records"
           tone={
-            isIncidentActive
+            activeIncidentCount > 0
               ? "warning"
               : undefined
           }
@@ -223,80 +241,102 @@ export default function Overview() {
 
         <MetricCard
           label="Awaiting approval"
-          value={awaitingApprovalCount}
-          detail={
-            latestIncident?.awaiting_approval
-              ? "Human action required"
-              : "No authorization pending"
-          }
+          value={String(pendingApprovals.length).padStart(2, "0")}
+          detail="Human authorization required"
           tone={
-            latestIncident?.awaiting_approval
+            pendingApprovals.length > 0
               ? "warning"
               : undefined
           }
         />
 
         <MetricCard
-          label="Recovered"
-          value={recoveredCount}
-          detail={
-            recoveredCount === "01"
-              ? "Recovery verified"
-              : "No verified recovery"
-          }
-          tone={
-            recoveredCount === "01"
-              ? "success"
-              : undefined
-          }
-        />
-
-        <MetricCard
-          label="Risk level"
-          value={
-            latestIncident?.risk_level
-              ?.slice(0, 4)
-              .toUpperCase() || "—"
-          }
-          detail={
-            latestIncident?.risk_level
-              ? `${latestIncident.risk_level} risk operation`
-              : "No risk assessment loaded"
-          }
-          tone={
-            latestIncident?.risk_level ===
-            "high"
-              ? "warning"
-              : undefined
-          }
+          label="Resolved"
+          value={String(resolvedIncidentCount).padStart(2, "0")}
+          detail="In latest 50 records"
+          tone="success"
         />
       </section>
 
-      <section className="dashboard-grid">
-        <ActiveIncident
-          incident={latestIncident}
-        />
+      <WorkflowGraphic />
 
-        <AgentTimeline
-          incident={latestIncident}
-        />
+      <section className="overview-command-grid">
+        <div className="overview-primary-stack">
+          <ActiveIncident incident={latestIncident} />
+          <AgentTimeline incident={latestIncident} />
+        </div>
+
+        <aside className="overview-secondary-stack">
+          <section className="overview-approval-queue">
+            <div className="overview-queue-heading">
+              <div>
+                <span className="panel-kicker">Human authorization</span>
+                <h2>Approval queue</h2>
+              </div>
+              <span className="overview-queue-count">
+                {isLoadingIncident ? "—" : pendingApprovals.length}
+              </span>
+            </div>
+
+            {isLoadingIncident ? (
+              <div className="overview-queue-empty" role="status">
+                Loading approval queue…
+              </div>
+            ) : approvalQueueUnavailable ? (
+              <div className="overview-queue-empty" role="alert">
+                The approval queue could not be loaded. Check the service connection and retry from Approvals.
+              </div>
+            ) : featuredApproval ? (
+              <>
+                <ApprovalCard
+                  incident={featuredApproval}
+                  onDecisionCompleted={handleDecisionCompleted}
+                />
+                {pendingApprovals.length > 1 && (
+                  <p className="overview-queue-note">
+                    {pendingApprovals.length - 1} more pending in the Approvals view.
+                  </p>
+                )}
+              </>
+            ) : (
+              <div className="overview-queue-empty">
+                No pending human authorizations.
+              </div>
+            )}
+          </section>
+
+          <ServiceHealth refreshKey={serviceRefreshKey} />
+        </aside>
       </section>
 
-      {latestIncident?.awaiting_approval && (
-        <section className="dashboard-section">
-          <ApprovalCard
-            incident={latestIncident}
-            onDecisionCompleted={
-              handleDecisionCompleted
-            }
-          />
-        </section>
-      )}
-
-      <section className="dashboard-section">
-        <ServiceHealth
-          refreshKey={serviceRefreshKey}
-        />
+      <section className="dashboard-panel recent-activity-panel">
+        <div className="panel-heading">
+          <div>
+            <span className="panel-kicker">Audit stream</span>
+            <h3>Recent operational activity</h3>
+          </div>
+          <span className="incident-count">Newest first</span>
+        </div>
+        {recentEvents.length ? (
+          <div className="overview-activity-list">
+            {recentEvents.map((event) => (
+              <div className="overview-activity-row" key={event.id}>
+                <span className="overview-activity-marker" />
+                <div>
+                  <strong>{event.event_type?.replaceAll("_", " ") || "Operational event"}</strong>
+                  <span>{event.details || event.incident_id || "Recorded activity"}</span>
+                </div>
+                <time>{event.created_at ? new Date(event.created_at).toLocaleString() : "—"}</time>
+              </div>
+            ))}
+          </div>
+        ) : auditStreamUnavailable ? (
+          <div className="overview-activity-empty" role="alert">
+            Recent audit activity could not be loaded.
+          </div>
+        ) : (
+          <div className="overview-activity-empty">No recent audit events are available.</div>
+        )}
       </section>
 
       <NewIncidentModal
@@ -308,6 +348,6 @@ export default function Overview() {
           handleIncidentCreated
         }
       />
-    </>
+    </div>
   );
 }

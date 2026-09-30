@@ -60,9 +60,8 @@ function buildEvents(incident) {
 
   if (incident.hypothesis) {
     events.push({
-      title: "Hypothesis generated",
-      detail:
-        "Aegis correlated the collected evidence and generated an incident hypothesis.",
+      title: "AI investigation completed",
+      detail: cleanMarkdown(incident.hypothesis),
       status: "complete",
     });
   }
@@ -70,9 +69,17 @@ function buildEvents(incident) {
   if (incident.proposed_action) {
     events.push({
       title: "Remediation proposed",
-      detail: formatActionType(
-        incident.proposed_action.action_type
-      ),
+      detail:
+        incident.proposed_action.rationale ||
+        formatActionType(incident.proposed_action.action_type),
+      status: "complete",
+    });
+  }
+
+  if (incident.risk_level) {
+    events.push({
+      title: "Risk policy evaluated",
+      detail: `${incident.risk_level.toUpperCase()} risk · ${incident.requires_approval ? "human authorization required" : "no human approval required"}`,
       status: "complete",
     });
   }
@@ -142,6 +149,14 @@ function buildEvents(incident) {
     });
   }
 
+  if (["completed", "resolved"].includes(incident.status)) {
+    events.push({
+      title: "Workflow completed",
+      detail: "The incident workflow reached a terminal state.",
+      status: "complete",
+    });
+  }
+
   return events;
 }
 
@@ -150,29 +165,27 @@ export default function AgentTimeline({
 }) {
   const events = buildEvents(incident);
 
-  const agentState =
-    incident?.awaiting_approval
-      ? "Paused"
-      : incident
-        ? "Completed"
-        : "Idle";
+  const statusLabel = incident?.status
+    ?.replaceAll("_", " ")
+    .replace(/\b\w/g, (character) => character.toUpperCase());
+  const workflowState = incident?.awaiting_approval
+    ? "Awaiting approval"
+    : statusLabel || "No incident selected";
 
   return (
     <article className="dashboard-panel timeline-panel">
       <div className="panel-heading">
         <div>
-          <span className="panel-kicker">
-            Agent activity
-          </span>
+          <span className="panel-kicker">AI reasoning &amp; control</span>
 
           <h3>
-            Investigation timeline
+            Workflow progression
           </h3>
         </div>
 
-        <div className="agent-state">
-          <span />
-          {agentState}
+        <div className={`agent-state ${incident?.awaiting_approval ? "agent-state--paused" : ""}`}>
+          <span aria-hidden="true" />
+          {workflowState}
         </div>
       </div>
 
@@ -230,13 +243,13 @@ export default function AgentTimeline({
         <Search size={14} />
 
         <span>
-          Evidence-grounded investigation
+          LLM proposes
         </span>
 
         <ShieldAlert size={14} />
 
         <span>
-          Policy-controlled execution
+          Policy evaluates · human authorizes · application executes
         </span>
       </div>
     </article>

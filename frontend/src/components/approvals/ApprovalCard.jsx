@@ -105,12 +105,14 @@ export default function ApprovalCard({
         <div className="approval-heading">
           <div>
             <span className="panel-kicker">
-              Human authorization required
+              {incident.risk_level
+                ? `${incident.risk_level.toUpperCase()}-RISK ACTION · HUMAN AUTHORIZATION REQUIRED`
+                : "ACTION REQUIRING HUMAN AUTHORIZATION"}
             </span>
 
             <h3>
               {actionLabel}{" "}
-              {incident.service}
+              {action.service || incident.service}
             </h3>
           </div>
 
@@ -121,18 +123,25 @@ export default function ApprovalCard({
           </span>
         </div>
 
-        <p>
-          Aegis has proposed a consequential
-          infrastructure mutation. Execution
-          remains blocked until an authorized
-          approver explicitly reviews the
-          action.
+        <p className="approval-reason-copy">
+          <strong>Why:</strong> {action.rationale || incident.description || "No rationale was provided."}
         </p>
 
+        <div className="approval-lifecycle" aria-label="Authorization workflow">
+          <span><b>1</b> LLM proposes</span>
+          <i />
+          <span><b>2</b> Policy evaluates</span>
+          <i />
+          <span className="approval-lifecycle__current"><b>3</b> Human authorizes</span>
+          <i />
+          <span><b>4</b> Application executes</span>
+        </div>
+
         <div className="approval-action">
-          <span>
-            {action.action_type}
-          </span>
+          <div className="approval-action__description">
+            <span>Proposed action</span>
+          <strong>{actionLabel} · {action.service || incident.service}</strong>
+          </div>
 
           {(fromVersion ||
             toVersion) && (
@@ -148,6 +157,15 @@ export default function ApprovalCard({
               </code>
             </div>
           )}
+        </div>
+
+        <div className="approval-precondition">
+          <span>Precondition</span>
+          <strong>
+            {fromVersion
+              ? `Expected current version: ${fromVersion}`
+              : "Version precondition is checked before execution"}
+          </strong>
         </div>
 
         {canApprove ? (

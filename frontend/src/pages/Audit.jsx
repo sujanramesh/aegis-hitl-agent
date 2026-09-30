@@ -122,6 +122,12 @@ function Audit() {
     loadAuditEvents();
   }, []);
 
+  const chronologicalEvents = [...events].sort((left, right) => {
+    const leftTime = new Date(left.created_at || 0).getTime();
+    const rightTime = new Date(right.created_at || 0).getTime();
+    return leftTime - rightTime || left.id - right.id;
+  });
+
   return (
     <div className="audit-page">
       <div className="page-heading audit-page-heading">
@@ -196,7 +202,7 @@ function Audit() {
           </div>
 
           <span className="audit-event-count">
-            {events.length} events
+            {events.length} events · oldest first
           </span>
         </div>
 
@@ -223,81 +229,32 @@ function Audit() {
         {!error &&
           !loading &&
           events.length > 0 && (
-            <div className="audit-table-wrapper">
-              <table className="audit-table">
-                <thead>
-                  <tr>
-                    <th>Event</th>
-                    <th>Actor</th>
-                    <th>Incident</th>
-                    <th>Details</th>
-                    <th>Recorded</th>
-                  </tr>
-                </thead>
-
-                <tbody>
-                  {events.map((event) => {
+            <div className="audit-event-list">
+              {chronologicalEvents.map((event) => {
                     const EventIcon =
                       getEventIcon(
                         event.event_type
                       );
 
                     return (
-                      <tr key={event.id}>
-                        <td>
-                          <div className="audit-event-cell">
-                            <span className="audit-event-icon">
-                              <EventIcon size={15} />
-                            </span>
-
-                            <span>
-                              {formatEventType(
-                                event.event_type
-                              )}
-                            </span>
+                      <article className="audit-event" key={event.id}>
+                        <div className="audit-event__rail">
+                          <span className="audit-event-icon"><EventIcon size={15} /></span>
+                        </div>
+                        <div className="audit-event__body">
+                          <div className="audit-event__heading">
+                            <strong>{formatEventType(event.event_type)}</strong>
+                            <time className="audit-time">{formatDate(event.created_at)}</time>
                           </div>
-                        </td>
-
-                        <td>
-                          <span className="audit-actor">
-                            {event.actor || "—"}
-                          </span>
-                        </td>
-
-                        <td>
-                          <span
-                            className="audit-incident-id"
-                            title={
-                              event.incident_id ||
-                              undefined
-                            }
-                          >
-                            {shortenIncidentId(
-                              event.incident_id
-                            )}
-                          </span>
-                        </td>
-
-                        <td>
-                          <span className="audit-details">
-                            {parseDetails(
-                              event.details
-                            )}
-                          </span>
-                        </td>
-
-                        <td>
-                          <span className="audit-time">
-                            {formatDate(
-                              event.created_at
-                            )}
-                          </span>
-                        </td>
-                      </tr>
+                          <p className="audit-details">{parseDetails(event.details)}</p>
+                          <div className="audit-event__meta">
+                            <span>Actor <b>{event.actor || "—"}</b></span>
+                            <span>Incident <b className="audit-incident-id" title={event.incident_id || undefined}>{shortenIncidentId(event.incident_id)}</b></span>
+                          </div>
+                        </div>
+                      </article>
                     );
                   })}
-                </tbody>
-              </table>
             </div>
           )}
       </section>

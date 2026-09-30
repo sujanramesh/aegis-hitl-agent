@@ -143,8 +143,8 @@ export default function ActiveIncident({
 
       <div className="incident-summary">
         <span>
-          {incident.status === "resolved"
-            ? "Resolved incident"
+          {["completed", "resolved", "rejected", "failed", "llm_unavailable", "action_cancelled"].includes(incident.status)
+            ? "Incident summary"
             : "Active incident"}
         </span>
 
@@ -153,7 +153,12 @@ export default function ActiveIncident({
             "Operational incident"}
         </h4>
 
-        <p>{hypothesis}</p>
+        <div className="incident-summary__reasoning">
+          <span className="panel-kicker">
+            {incident.hypothesis ? "AI hypothesis" : "Incident description"}
+          </span>
+          <p>{hypothesis}</p>
+        </div>
       </div>
 
       {Array.isArray(incident.evidence) &&

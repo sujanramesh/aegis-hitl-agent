@@ -1,6 +1,6 @@
 import {
   Activity,
-  BellRing,
+  ShieldAlert,
   FileClock,
   Gauge,
   Layers3,
@@ -22,7 +22,7 @@ const primaryNavigation = [
   {
     id: "approvals",
     label: "Approvals",
-    icon: BellRing,
+    icon: ShieldAlert,
   },
   {
     id: "services",
@@ -57,6 +57,9 @@ function NavigationItem({
       className={`nav-item ${
         active ? "nav-item--active" : ""
       }`}
+      aria-label={item.label}
+      aria-current={active ? "page" : undefined}
+      title={item.label}
       onClick={() => onSelect(item.id)}
     >
       <Icon size={17} strokeWidth={1.8} />
@@ -94,9 +97,7 @@ export default function Sidebar({
             AEGIS
           </div>
 
-          <div className="brand-description">
-            Autonomous Operations
-          </div>
+          <div className="brand-description">AI Operations</div>
         </div>
       </div>
 
@@ -104,6 +105,7 @@ export default function Sidebar({
         className="navigation"
         aria-label="Primary navigation"
       >
+        <div className="nav-section-label">Operations</div>
         <div className="nav-group">
           {primaryNavigation.map(
             (item) => (
@@ -119,9 +121,7 @@ export default function Sidebar({
           )}
         </div>
 
-        <div className="nav-section-label">
-          Observe
-        </div>
+        <div className="nav-section-label">Observability</div>
 
         <div className="nav-group">
           {observeNavigation.map(

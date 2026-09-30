@@ -11,6 +11,8 @@ import {
   } from "react";
   
   import StatusBadge from "../components/common/StatusBadge";
+  import AgentTimeline from "../components/incidents/AgentTimeline";
+  import ApprovalCard from "../components/approvals/ApprovalCard";
   import {
     getIncident,
     getIncidents,
@@ -383,6 +385,17 @@ import {
                   }
                 </p>
               </div>
+              <div className="incident-detail-workflow">
+                <AgentTimeline incident={selectedIncident} />
+              </div>
+              {selectedIncident.awaiting_approval && (
+                <div className="incident-detail-workflow">
+                  <ApprovalCard
+                    incident={selectedIncident}
+                    onDecisionCompleted={setSelectedIncident}
+                  />
+                </div>
+              )}
             </section>
           )}
       </>

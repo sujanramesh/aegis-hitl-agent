@@ -1,5 +1,3 @@
-import { ArrowUpRight } from "lucide-react";
-
 export default function MetricCard({
   label,
   value,
@@ -11,10 +9,9 @@ export default function MetricCard({
       <div className="metric-card__header">
         <span>{label}</span>
 
-        <ArrowUpRight
-          size={14}
-          strokeWidth={1.7}
-          className="metric-card__icon"
+        <span
+          className={`metric-card__indicator metric-card__indicator--${tone}`}
+          aria-hidden="true"
         />
       </div>
 
