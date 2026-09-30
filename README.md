@@ -6,7 +6,7 @@ Aegis is a production-oriented AI operations agent designed to investigate incid
 
 The core principle is:
 
-> **The LLM can reason and propose. The application controls policy, authorization, execution, and verification.**
+**The LLM can reason and propose. The application controls policy, authorization, execution, and verification.**
 
 Aegis demonstrates how AI agents can assist with operational incident response while maintaining deterministic safety controls and human oversight.
 
